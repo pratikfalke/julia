@@ -737,8 +737,8 @@ r7484 = 0.1:0.1:1
 # issue #7387
 for r in (0:1, 0.0:1.0)
     local r
-    @test [r+im;] == [r;]+im
-    @test [r-im;] == [r;]-im
+    @test [r .+ im;] == [r;] .+ im
+    @test [r .- im;] == [r;] .- im
     @test [r*im;] == [r;]*im
     @test [r/im;] == [r;]/im
 end
@@ -901,13 +901,13 @@ function test_linspace_identity(r::Range{T}, mr) where T
     @test -collect(r) == collect(mr)
     @test isa(-r, typeof(r))
 
-    @test 1 + r + (-1) == r
-    @test 1 + collect(r) == collect(1 + r) == collect(r + 1)
-    @test isa(1 + r + (-1), typeof(r))
-    @test 1 - r - 1 == mr
-    @test 1 - collect(r) == collect(1 - r) == collect(1 + mr)
-    @test collect(r) - 1 == collect(r - 1) == -collect(mr + 1)
-    @test isa(1 - r - 1, typeof(r))
+    @test broadcast(+, broadcast(+, 1, r), -1) == r
+    @test 1 .+ collect(r) == collect(1 .+ r) == collect(r .+ 1)
+    @test isa(1 .+ r .+ (-1), typeof(r))
+    @test broadcast(-, broadcast(-, 1, r), 1) == mr
+    @test 1 .- collect(r) == collect(1 .- r) == collect(1 .+ mr)
+    @test collect(r) .- 1 == collect(r .- 1) == -collect(mr .+ 1)
+    @test isa(broadcast(-, broadcast(-, 1, r), 1), typeof(r))
 
     @test 1 * r * 1 == r
     @test 2 * r * T(0.5) == r

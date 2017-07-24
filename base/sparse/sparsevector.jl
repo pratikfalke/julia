@@ -1892,7 +1892,7 @@ function sort(x::SparseVector{Tv,Ti}; kws...) where {Tv,Ti}
     n,k = length(x),length(allvals)
     z = findfirst(sinds,k)
     newnzind = collect(Ti,1:k-1)
-    newnzind[z:end]+= n-k+1
+    newnzind[z:end] .+= n-k+1
     newnzvals = allvals[deleteat!(sinds[1:k],z)]
     SparseVector(n,newnzind,newnzvals)
 end

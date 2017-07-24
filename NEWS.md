@@ -407,6 +407,10 @@ Deprecated or removed
   * `select`, `select!`, `selectperm` and `selectperm!` have been renamed respectively to
     `partialsort`, `partialsort!`, `partialsortperm` and `partialsortperm!` ([#23051]).
 
+  * Automatically broadcasted `+` and `-` for `array + scalar`, `scalar - array`, and so-on have
+    been deprecated due to inconsistency with linear algebra. Use `.+` and `.-` for these operations
+    instead.
+
 Command-line option changes
 ---------------------------
 
