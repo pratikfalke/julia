@@ -770,9 +770,9 @@ broadcast(::typeof(+), x::Real, r::AbstractUnitRange) = range(x + first(r), leng
 # For #18336 we need to prevent promotion of the step type:
 broadcast(::typeof(+), x::Number, r::AbstractUnitRange) = range(x + first(r), step(r), length(r))
 broadcast(::typeof(+), x::Number, r::Range) = (x+first(r)):step(r):(x+last(r))
-function broadcast(::typeof(+), x::Number, r::StepRangeLen)
+function broadcast(::typeof(+), x::Number, r::StepRangeLen{T}) where T
     newref = x + r.ref
-    StepRangeLen{eltype(newref),typeof(newref),typeof(r.step)}(newref, r.step, length(r), r.offset)
+    StepRangeLen{typeof(T(r.ref) + x)}(newref, r.step, length(r), r.offset)
 end
 function broadcast(::typeof(+), x::Number, r::LinSpace)
     LinSpace(x + r.start, x + r.stop, r.len)
