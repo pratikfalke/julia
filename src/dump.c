@@ -370,14 +370,17 @@ static void jl_serialize_module(jl_serializer_state *s, jl_module_t *m)
     writetag(s->s, jl_module_type);
     jl_serialize_value(s, m->name);
     int ref_only = 0;
-    if (!module_in_worklist(m))
-        ref_only = 1;
-    write_int8(s->s, ref_only);
-    jl_serialize_value(s, m->parent);
-    if (ref_only) {
-        assert(m->parent != m);
-        return;
+    if (!module_in_worklist(m)) {
+        if (m == m->parent)
+            ref_only = 2;
+        else
+            ref_only = 1;
     }
+    write_int8(s->s, ref_only);
+    if (ref_only != 2)
+        jl_serialize_value(s, m->parent);
+    if (ref_only)
+        return;
     size_t i;
     void **table = m->bindings.table;
     for(i=1; i < m->bindings.size; i+=2) {
@@ -994,27 +997,24 @@ static void jl_collect_backedges(jl_array_t *s)
     }
 }
 
-// serialize information about all of the modules accessible directly from Main
+// serialize information about all loaded modules
 static void write_mod_list(ios_t *s)
 {
-    jl_module_t *m = jl_main_module;
+    jl_value_t *loaded_modules = jl_get_global(jl_base_module, jl_symbol("loaded_modules"));
+    jl_array_t *ht = (jl_array_t*)jl_get_nth_field(loaded_modules, 0);
+    assert(jl_is_array(ht));
+    void **table = (void**)jl_array_data(ht);
     size_t i;
-    void **table = m->bindings.table;
-    for (i = 1; i < m->bindings.size; i += 2) {
-        if (table[i] != HT_NOTFOUND) {
-            jl_binding_t *b = (jl_binding_t*)table[i];
-            if (b->owner == m &&
-                    b->value && b->constp &&
-                    jl_is_module(b->value) &&
-                    !module_in_worklist((jl_module_t*)b->value)) {
-                jl_module_t *child = (jl_module_t*)b->value;
-                if (child->name == b->name) {
-                    // this is the original/primary binding for the submodule
-                    size_t l = strlen(jl_symbol_name(child->name));
-                    write_int32(s, l);
-                    ios_write(s, jl_symbol_name(child->name), l);
-                    write_uint64(s, child->uuid);
-                }
+    size_t len = jl_array_len(ht);
+    for (i = 1; i < len; i += 2) {
+        if (table[i] != NULL) {
+            jl_module_t *m = (jl_module_t*)table[i];
+            assert(jl_is_module(m));
+            if (!module_in_worklist(m)) {
+                size_t l = strlen(jl_symbol_name(m->name));
+                write_int32(s, l);
+                ios_write(s, jl_symbol_name(m->name), l);
+                write_uint64(s, m->uuid);
             }
         }
     }
@@ -1045,7 +1045,7 @@ static void write_work_list(ios_t *s)
     int i, l = jl_array_len(serializer_worklist);
     for (i = 0; i < l; i++) {
         jl_module_t *workmod = (jl_module_t*)jl_array_ptr_ref(serializer_worklist, i);
-        if (workmod->parent == jl_main_module) {
+        if (workmod->parent == jl_main_module || workmod->parent == workmod) {
             size_t l = strlen(jl_symbol_name(workmod->name));
             write_int32(s, l);
             ios_write(s, jl_symbol_name(workmod->name), l);
@@ -1505,6 +1505,8 @@ static jl_value_t *jl_deserialize_value_method_instance(jl_serializer_state *s, 
     return (jl_value_t*)li;
 }
 
+jl_module_t *jl_lookup_root_module(jl_value_t *key);
+
 static jl_value_t *jl_deserialize_value_module(jl_serializer_state *s)
 {
     int usetable = (s->mode != MODE_AST);
@@ -1514,7 +1516,11 @@ static jl_value_t *jl_deserialize_value_module(jl_serializer_state *s)
     jl_sym_t *mname = (jl_sym_t*)jl_deserialize_value(s, NULL);
     int ref_only = read_uint8(s->s);
     if (ref_only) {
-        jl_value_t *m_ref = jl_get_global((jl_module_t*)jl_deserialize_value(s, NULL), mname);
+        jl_value_t *m_ref;
+        if (ref_only == 1)
+            m_ref = jl_get_global((jl_module_t*)jl_deserialize_value(s, NULL), mname);
+        else
+            m_ref = (jl_value_t*)jl_lookup_root_module((jl_value_t*)mname);
         if (usetable)
             backref_list.items[pos] = m_ref;
         return m_ref;
@@ -1910,21 +1916,18 @@ static jl_value_t *read_verify_mod_list(ios_t *s, arraylist_t *dependent_worlds)
         uint64_t uuid = read_uint64(s);
         jl_sym_t *sym = jl_symbol(name);
         jl_module_t *m = NULL;
-        if (jl_binding_resolved_p(jl_main_module, sym))
-            m = (jl_module_t*)jl_get_global(jl_main_module, sym);
         if (!m) {
             static jl_value_t *require_func = NULL;
             if (!require_func)
                 require_func = jl_get_global(jl_base_module, jl_symbol("require"));
             jl_value_t *reqargs[2] = {require_func, (jl_value_t*)sym};
             JL_TRY {
-                jl_apply(reqargs, 2);
+                m = (jl_module_t*)jl_apply(reqargs, 2);
             }
             JL_CATCH {
                 ios_close(s);
                 jl_rethrow();
             }
-            m = (jl_module_t*)jl_get_global(jl_main_module, sym);
         }
         if (!m) {
             return jl_get_exceptionf(jl_errorexception_type,
@@ -2001,23 +2004,8 @@ static void jl_reinit_item(jl_value_t *v, int how, arraylist_t *tracee_list)
                 jl_gc_wb(v, *a);
                 break;
             }
-            case 2: { // reinsert module v into parent (const)
-                jl_module_t *mod = (jl_module_t*)v;
-                jl_binding_t *b = jl_get_binding_wr(mod->parent, mod->name, 1);
-                jl_declare_constant(b); // this can throw
-                if (b->value != NULL) {
-                    if (!jl_is_module(b->value)) {
-                        jl_errorf("Invalid redefinition of constant %s.",
-                                  jl_symbol_name(mod->name)); // this also throws
-                    }
-                    if (jl_generating_output() && jl_options.incremental) {
-                        jl_errorf("Cannot replace module %s during incremental precompile.", jl_symbol_name(mod->name));
-                    }
-                    jl_printf(JL_STDERR, "WARNING: replacing module %s.\n",
-                              jl_symbol_name(mod->name));
-                }
-                b->value = v;
-                jl_gc_wb_binding(b, v);
+            case 2: {
+                // top level modules handled by loader
                 break;
             }
             case 3: { // rehash MethodTable

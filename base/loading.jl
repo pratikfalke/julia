@@ -288,6 +288,7 @@ function reload(name::AbstractString)
         error("use `include` instead of `reload` to load source files")
     else
         # reload("Package") is ok
+        delete!(loaded_modules, Symbol(name))
         require(Symbol(name))
     end
 end
@@ -315,25 +316,66 @@ all platforms, including those with case-insensitive filesystems like macOS and
 Windows.
 """
 function require(mod::Symbol)
-    _require(mod)
+    existed = root_module_exists(mod)
+    M = _require(mod)
     # After successfully loading, notify downstream consumers
     if toplevel_load[] && myid() == 1 && nprocs() > 1
         # broadcast top-level import/using from node 1 (only)
         @sync for p in procs()
             p == 1 && continue
             @async remotecall_wait(p) do
-                if !isbindingresolved(Main, mod) || !isdefined(Main, mod)
-                    _require(mod)
-                end
+                _require(mod)
+                nothing
             end
         end
     end
-    for callback in package_callbacks
-        invokelatest(callback, mod)
+    if !existed
+        for callback in package_callbacks
+            invokelatest(callback, mod)
+        end
     end
+    return M
 end
 
+const loaded_modules = ObjectIdDict()
+const module_keys = ObjectIdDict()
+
+function register_root_module(key, m::Module)
+    if m !== Core && m !== Base
+        # top-level modules have module_parent(m) === m
+        ccall(:jl_module_set_parent, Void, (Any, Any), m, m)
+    end
+    loaded_modules[key] = m
+    module_keys[m] = key
+    nothing
+end
+
+register_root_module(:Core, Core)
+register_root_module(:Base, Base)
+register_root_module(:Main, Main)
+
+is_root_module(m::Module) = haskey(module_keys, m)
+
+root_module_key(m::Module) = module_keys[m]
+
+const temp_mod_name = :__anon__b4bee962f69290f4
+
+# get a top-level Module from the given key
+# for now keys can only be Symbols, but that will change
+function root_module(key::Symbol)
+    m = loaded_modules[key]
+    if module_name(m) == temp_mod_name
+        return getfield(m, key)
+    end
+    return m
+end
+
+root_module_exists(key::Symbol) = haskey(loaded_modules, key)
+
 function _require(mod::Symbol)
+    if root_module_exists(mod)
+        return root_module(mod)
+    end
     # dependency-tracking is only used for one top-level include(path),
     # and is not applied recursively to imported modules:
     old_track_dependencies = _track_dependencies[]
@@ -345,7 +387,7 @@ function _require(mod::Symbol)
     if loading !== false
         # load already in progress for this module
         wait(loading)
-        return
+        return root_module(mod)
     end
     package_locks[mod] = Condition()
 
@@ -364,7 +406,9 @@ function _require(mod::Symbol)
         if JLOptions().use_compilecache != 0
             doneprecompile = _require_search_from_serialized(mod, path)
             if !isa(doneprecompile, Bool)
-                return # success
+                M = doneprecompile[end]
+                register_root_module(mod, M)
+                return M # success
             end
         end
 
@@ -391,14 +435,20 @@ function _require(mod::Symbol)
                 warn(m, prefix="WARNING: ")
                 # fall-through, TODO: disable __precompile__(true) error so that the normal include will succeed
             else
-                return # success
+                M = m[end]
+                register_root_module(mod, M)
+                return M # success
             end
         end
 
         # just load the file normally via include
         # for unknown dependencies
+        local M
         try
-            Base.include_relative(Main, path)
+            # TODO: this is a hack to handle circular module references
+            tempmod = Module(temp_mod_name)
+            loaded_modules[mod] = tempmod
+            M = Base.include_relative(tempmod, path)
         catch ex
             if doneprecompile === true || JLOptions().use_compilecache == 0 || !precompilableerror(ex, true)
                 rethrow() # rethrow non-precompilable=true errors
@@ -411,7 +461,10 @@ function _require(mod::Symbol)
                 # TODO: disable __precompile__(true) error and do normal include instead of error
                 error("Module $mod declares __precompile__(true) but require failed to create a usable precompiled cache file.")
             end
+            M = m[end]
         end
+        register_root_module(mod, M)
+        return M
     finally
         toplevel_load[] = last
         loading = pop!(package_locks, mod)
@@ -570,15 +623,9 @@ function compilecache(name::String)
     cachefile::String = abspath(cachepath, name*".ji")
     # build up the list of modules that we want the precompile process to preserve
     concrete_deps = copy(_concrete_dependencies)
-    for existing in names(Main)
-        if isdefined(Main, existing)
-            mod = getfield(Main, existing)
-            if isa(mod, Module) && !(mod === Main || mod === Core || mod === Base)
-                mod = mod::Module
-                if module_parent(mod) === Main && module_name(mod) === existing
-                    push!(concrete_deps, (existing, module_uuid(mod)))
-                end
-            end
+    for (key,mod) in loaded_modules
+        if !(mod === Main || mod === Core || mod === Base)
+            push!(concrete_deps, (key, module_uuid(mod)))
         end
     end
     # run the expression and cache the result
@@ -675,7 +722,7 @@ function stale_cachefile(modpath::String, cachefile::String)
             if mod == :Main || mod == :Core || mod == :Base
                 continue
             # Module is already loaded
-            elseif isbindingresolved(Main, mod)
+            elseif root_module_exists(mod)
                 continue
             end
             name = string(mod)
