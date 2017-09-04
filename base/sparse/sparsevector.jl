@@ -994,7 +994,7 @@ function hvcat(rows::Tuple{Vararg{Int}}, X::_SparseConcatGroup...)
     tmp_rows = Vector{SparseMatrixCSC}(nbr)
     k = 0
     @inbounds for i = 1 : nbr
-        tmp_rows[i] = hcat(X[(1 : rows[i]) + k]...)
+        tmp_rows[i] = hcat(X[(1 : rows[i]) .+ k]...)
         k += rows[i]
     end
     vcat(tmp_rows...)
@@ -1827,7 +1827,7 @@ for isunittri in (true, false), islowertri in (true, false)
                 nzrange = $( (islowertri && !istrans) || (!islowertri && istrans) ?
                     :(b.nzind[1]:b.n) :
                     :(1:b.nzind[end]) )
-                nzrangeviewbnz = view(b.nzval, nzrange - b.nzind[1] + 1)
+                nzrangeviewbnz = view(b.nzval, nzrange .- (b.nzind[1] - 1))
                 nzrangeviewA = $tritype(view(A.data, nzrange, nzrange))
                 ($func)(nzrangeviewA, nzrangeviewbnz)
                 # could strip any miraculous zeros here perhaps
